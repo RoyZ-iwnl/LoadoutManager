@@ -31,6 +31,8 @@
 
 ## 安装
 
+在 [GHPC Mod Manager](https://GHPC.DMR.gg/) 上一键安装
+
 1. 为 GHPC 安装 [MelonLoader](https://melonwiki.xyz/#/?id=requirements)
 2. 将 `LoadoutManager.dll` 放入 `Mods/` 文件夹
 

@@ -31,6 +31,8 @@ A [MelonLoader](https://melonwiki.xyz/) mod for **Gunner HEAT PC** that allows p
 
 ## Installation
 
+One key install Available on [GHPC Mod Manager](https://GHPC.DMR.gg/?lang=en)
+
 1. Install [MelonLoader](https://melonwiki.xyz/#/?id=requirements) for GHPC
 2. Drop `LoadoutManager.dll` into the `Mods/` folder
 
