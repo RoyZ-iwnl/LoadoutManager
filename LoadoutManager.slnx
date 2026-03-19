@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="LoadoutManager.csproj" Id="11d75128-76c2-4d72-ab80-cc07794581db">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
+</Solution>
