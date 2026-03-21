@@ -40,6 +40,10 @@ namespace LoadoutManager
                 { Language.English, "Rack Total" },
                 { Language.Chinese, "弹药架总计" }
             }},
+            { "total_ammo_budget", new Dictionary<Language, string> {
+                { Language.English, "Total Ammo Budget" },
+                { Language.Chinese, "总弹药预算" }
+            }},
 
             // Rack0 hidden message
             { "rack_0_hidden", new Dictionary<Language, string> {

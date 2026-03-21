@@ -12,7 +12,7 @@ using GHPC.Vehicle;
 using GHPC.State;
 using GHPC.Effects;
 
-[assembly: MelonInfo(typeof(LoadoutManager.LoadoutManagerMod), "Loadout Manager", "1.2.0", "RoyZ")]
+[assembly: MelonInfo(typeof(LoadoutManager.LoadoutManagerMod), "Loadout Manager", "1.2.0A", "RoyZ")]
 [assembly: MelonGame("Radian Simulations LLC", "GHPC")]
 
 namespace LoadoutManager
@@ -49,7 +49,7 @@ namespace LoadoutManager
         // 待延迟处理的载具队列（用于 M6A2-ADATS 兼容）
         private Queue<object> pendingVehicles = new Queue<object>();
         private float pendingVehicleTimer = 0f;
-        private const float M6A2_ADATS_DELAY_SECONDS = 0.5f; // 延迟0.5秒等待 M6A2-ADATS 完成修改
+        private const float M6A2_ADATS_DELAY_SECONDS = 2f; // 延迟0.5秒等待 M6A2-ADATS 完成修改
 
         [System.Diagnostics.Conditional("DEBUG")]
         private static void Log(string msg)
@@ -367,7 +367,7 @@ namespace LoadoutManager
                 if (IsOriginalTotalAmmoLimitEnabled())
                 {
                     int currentTotal = GetWeaponRackGrandTotal(weapon);
-                    GUILayout.Label($"Total Ammo Budget: {currentTotal}/{weapon.originalRackTotalBudget}", GUILayout.Height(20));
+                    GUILayout.Label($"{LocalizationManager.Get("total_ammo_budget")}: {currentTotal}/{weapon.originalRackTotalBudget}", GUILayout.Height(20));
                 }
 
                 // 机炮/双弹链的 Rack 0 通常是供弹接口架，不是玩家真正要编辑的备弹架；先默认隐藏，后续可在这里加开关。
@@ -2212,6 +2212,7 @@ namespace LoadoutManager
             }
 
             int total = 0;
+            int firstRackIndex = GetVisibleRackStartIndex(weapon);
             foreach (var ammo in weapon.ammoTypes)
             {
                 if (ammo?.rackCounts == null)
@@ -2219,7 +2220,7 @@ namespace LoadoutManager
                     continue;
                 }
 
-                for (int rackIndex = 0; rackIndex < ammo.rackCounts.Length; rackIndex++)
+                for (int rackIndex = firstRackIndex; rackIndex < ammo.rackCounts.Length; rackIndex++)
                 {
                     total += Math.Max(0, ammo.rackCounts[rackIndex]);
                 }
@@ -2242,7 +2243,8 @@ namespace LoadoutManager
                 return;
             }
 
-            for (int rackIndex = 0; rackIndex < weapon.ammoTypes[0].rackCounts.Length && overflow > 0; rackIndex++)
+            int firstRackIndex = GetVisibleRackStartIndex(weapon);
+            for (int rackIndex = firstRackIndex; rackIndex < weapon.ammoTypes[0].rackCounts.Length && overflow > 0; rackIndex++)
             {
                 for (int ammoIndex = 0; ammoIndex < weapon.ammoTypes.Count && overflow > 0; ammoIndex++)
                 {
