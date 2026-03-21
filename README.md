@@ -10,6 +10,7 @@ A [MelonLoader](https://melonwiki.xyz/) mod for **Gunner HEAT PC** that allows p
 - **Autocannon Feed Support**: Adjust the composition of loaded ammo belts for autocannon weapons
 - **Chambered Ammo Selection**: Choose which ammo type is loaded in the chamber
 - **Dual Language Support**: English and Chinese UI
+- **Total Ammo Limit Option**: Limit editable ammo to the vehicle's current total (free distribution under fixed total)
 
 ## How to Use
 
@@ -45,6 +46,7 @@ After first launch, edit `UserData/MelonPreferences.cfg`:
 HideRack0ForAutocannon = true
 UIScale = 1.0
 Language = 0
+LimitTotalAmmoByOriginalVehicleCount = false
 ```
 
 | Option | Description | Default |
@@ -52,6 +54,7 @@ Language = 0
 | HideRack0ForAutocannon | Hide Rack 0 for autocannon vehicles (Rack 0 is the ready-to-fire ammo on feed) | true |
 | UIScale | UI scale multiplier (0.5-2.0) | 1.0 |
 | Language | Interface language (0=English, 1=Chinese) | 0 |
+| LimitTotalAmmoByOriginalVehicleCount | Limit editable rack ammo to the vehicle's current total when opening UI (free distribution under fixed total) | false |
 
 ## Credits
 

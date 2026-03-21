@@ -10,6 +10,7 @@
 - **机炮供弹支持**：调整机炮武器已装填弹链中的弹药组成
 - **膛内弹药选择**：选择装填入膛的弹药类型
 - **双语支持**：支持英文和中文界面
+- **弹药总量限制选项**：限制可编辑弹药总数为打开UI时该载具当前弹药总数（在固定总量下自由分配）
 
 ## 使用方法
 
@@ -45,6 +46,7 @@
 HideRack0ForAutocannon = true
 UIScale = 1.0
 Language = 1
+LimitTotalAmmoByOriginalVehicleCount = false
 ```
 
 | 选项 | 说明 | 默认值 |
@@ -52,6 +54,7 @@ Language = 1
 | HideRack0ForAutocannon | 隐藏机炮载具的 Rack 0（Rack 0 为供弹接口架上的待发弹药） | true |
 | UIScale | UI 缩放比例（0.5-2.0） | 1.0 |
 | Language | 界面语言（0=英文，1=中文） | 0 |
+| LimitTotalAmmoByOriginalVehicleCount | 限制可编辑弹药总数为打开UI时该载具当前弹药总数（在固定总量下自由分配） | false |
 
 ## 制作
 

@@ -10,8 +10,9 @@ using GHPC.Weapons;
 using GHPC.Weaponry;
 using GHPC.Vehicle;
 using GHPC.State;
+using GHPC.Effects;
 
-[assembly: MelonInfo(typeof(LoadoutManager.LoadoutManagerMod), "Loadout Manager", "1.0.0", "RoyZ")]
+[assembly: MelonInfo(typeof(LoadoutManager.LoadoutManagerMod), "Loadout Manager", "1.2.0", "RoyZ")]
 [assembly: MelonGame("Radian Simulations LLC", "GHPC")]
 
 namespace LoadoutManager
@@ -23,13 +24,37 @@ namespace LoadoutManager
         public static MelonPreferences_Entry<bool> hideRack0ForAutocannon;
         public static MelonPreferences_Entry<float> uiScale;
         public static MelonPreferences_Entry<int> language;
+        public static MelonPreferences_Entry<bool> limitTotalAmmoByOriginalVehicleCount;
 
-        // Debug开关（硬编码）
-        private const bool DEBUG_MODE = false;
+        // M6A2-ADATS 兼容性：检测该 Mod 是否存在
+        private static bool? _m6a2AdatsDetected = null;
+        private static bool IsM6A2AdatsPresent()
+        {
+            if (_m6a2AdatsDetected == null)
+            {
+                _m6a2AdatsDetected = false;
+                foreach (var melon in MelonMod.RegisteredMelons)
+                {
+                    if (melon.Info.Name.Contains("M6A2") || melon.Info.Name.Contains("ADATS"))
+                    {
+                        _m6a2AdatsDetected = true;
+                        MelonLogger.Msg($"{melon.Info.Name} DETECTED,DELAY MENU DISPLAY");
+                        break;
+                    }
+                }
+            }
+            return _m6a2AdatsDetected ?? false;
+        }
 
+        // 待延迟处理的载具队列（用于 M6A2-ADATS 兼容）
+        private Queue<object> pendingVehicles = new Queue<object>();
+        private float pendingVehicleTimer = 0f;
+        private const float M6A2_ADATS_DELAY_SECONDS = 0.5f; // 延迟0.5秒等待 M6A2-ADATS 完成修改
+
+        [System.Diagnostics.Conditional("DEBUG")]
         private static void Log(string msg)
         {
-            if (DEBUG_MODE) MelonLogger.Msg($"[DEBUG] {msg}");
+            MelonLogger.Msg($"[DEBUG] {msg}");
         }
 
         // 已配置的载具集合
@@ -57,6 +82,14 @@ namespace LoadoutManager
 
         // 反射缓存
         private static MethodInfo removeVisualMethod;
+        private static MethodInfo placeAmmoVisualMethod;
+        private static MethodInfo rackAddVisibleClipMethod;
+        private static MethodInfo rackAddInvisibleClipMethod;
+        private static MethodInfo rackAddClipToAnySlotMethod;
+        private static MethodInfo spawnCurrentLoadoutMethod;
+        private static FieldInfo rackFlammablesField;
+        private static MethodInfo flammablesRefreshExplosivesStatusMethod;
+        private static MethodInfo flammablesRefreshUndetonatedExplosivesStatusMethod;
         private static MethodInfo registerBallisticsMethod;
         private static FieldInfo totalAmmoCountField;
         private static FieldInfo totalAmmoTypesField;
@@ -88,6 +121,9 @@ namespace LoadoutManager
         private static FieldInfo playerInputSuspendGunnerInputsBackingField;
         private static FieldInfo playerInputSuspendInterfaceInputsBackingField;
         private static PropertyInfo weaponCurrentAmmoTypeProperty;
+        private static PropertyInfo fcsCurrentAmmoTypeProperty;
+        private static MethodInfo fcsAmmoTypeChangedMethod;
+        private static MethodInfo weaponNewRoundInBreechMethod;
         private static FieldInfo mainGunAmmoField;
         private static FieldInfo mainGunReadyRackField;
         private static FieldInfo mainGunAvailableAmmoField;
@@ -119,11 +155,22 @@ namespace LoadoutManager
             language = cfg.CreateEntry("Language", 0);
             language.Comment = "Language (0=English, 1=Chinese) - 语言";
 
+            limitTotalAmmoByOriginalVehicleCount = cfg.CreateEntry("LimitTotalAmmoByOriginalVehicleCount", false);
+            limitTotalAmmoByOriginalVehicleCount.Comment = "Limit editable rack ammo by the vehicle's current ammo total when opening UI (free distribution under fixed total). - 限制可编辑弹药总数为打开UI时该载具当前弹药总数（在固定总量下自由分配）";
+
             // 设置语言
             LocalizationManager.SetLanguage(language.Value);
 
             // 初始化反射
             removeVisualMethod = typeof(AmmoRack).GetMethod("RemoveAmmoVisualFromSlot", BindingFlags.Instance | BindingFlags.NonPublic);
+            placeAmmoVisualMethod = typeof(AmmoRack).GetMethod("PlaceAmmoVisualInSlot", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            rackAddVisibleClipMethod = typeof(AmmoRack).GetMethod("AddVisibleClip", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            rackAddInvisibleClipMethod = typeof(AmmoRack).GetMethod("AddInvisibleClip", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            rackAddClipToAnySlotMethod = typeof(AmmoRack).GetMethod("AddClipToAnySlot", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            spawnCurrentLoadoutMethod = typeof(GHPC.Weapons.LoadoutManager).GetMethod("SpawnCurrentLoadout", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            rackFlammablesField = typeof(AmmoRack).GetField("Flammables", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            flammablesRefreshExplosivesStatusMethod = typeof(FlammablesCluster).GetMethod("RefreshExplosivesStatus", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            flammablesRefreshUndetonatedExplosivesStatusMethod = typeof(FlammablesCluster).GetMethod("RefreshUndetonatedExplosivesStatus", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             registerBallisticsMethod = typeof(GHPC.Weapons.LoadoutManager).GetMethod("RegisterAllBallistics", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             totalAmmoCountField = typeof(GHPC.Weapons.LoadoutManager).GetField("_totalAmmoCount", BindingFlags.Instance | BindingFlags.NonPublic);
             totalAmmoTypesField = typeof(GHPC.Weapons.LoadoutManager).GetField("_totalAmmoTypes", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -155,6 +202,9 @@ namespace LoadoutManager
             playerInputSuspendGunnerInputsBackingField = typeof(PlayerInput).GetField("<SuspendGunnerInputs>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
             playerInputSuspendInterfaceInputsBackingField = typeof(PlayerInput).GetField("<SuspendInterfaceInputs>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
             weaponCurrentAmmoTypeProperty = typeof(WeaponSystem).GetProperty("CurrentAmmoType", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            fcsCurrentAmmoTypeProperty = typeof(FireControlSystem).GetProperty("CurrentAmmoType", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            fcsAmmoTypeChangedMethod = typeof(FireControlSystem).GetMethod("ammoTypeChanged", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            weaponNewRoundInBreechMethod = typeof(WeaponSystem).GetMethod("newRoundInBreech", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             mainGunAmmoField = typeof(MainGun).GetField("Ammo", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             mainGunReadyRackField = typeof(MainGun).GetField("_readyRack", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             mainGunAvailableAmmoField = typeof(MainGun).GetField("AvailableAmmo", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -167,13 +217,16 @@ namespace LoadoutManager
             mainGunSelectAmmoTypeMethod = typeof(MainGun).GetMethod("SelectAmmoType", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             mainGunForceRoundToBreechMethod = typeof(MainGun).GetMethod("ForceRoundToBreech", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
-            Log($"反射缓存: RemoveAmmoVisualFromSlot={(removeVisualMethod != null)}, RegisterAllBallistics={(registerBallisticsMethod != null)}, RefreshSnapshot={(refreshSnapshotMethod != null)}, _totalAmmoCount={(totalAmmoCountField != null)}, _totalAmmoTypes={(totalAmmoTypesField != null)}, StoredClips={(storedClipsProperty != null)}, StoredClipsBacking={(storedClipsBackingField != null)}, SlotIndices={(slotIndicesByAmmoTypeField != null)}, VisualSlots={(visualSlotsField != null)}, FeedLoadedClip={(feedLoadedClipProperty != null)}, AmmoTypeInBreechBacking={(ammoTypeInBreechBackingField != null)}, LoadedClipTypeBacking={(loadedClipTypeBackingField != null)}, QueuedClipTypeBacking={(queuedClipTypeBackingField != null)}, FeedClipMain={(feedClipMainField != null)}, FeedClipAux={(feedClipAuxField != null)}, FeedAuxMode={(feedAuxFeedModeField != null)}, FeedStart={(feedStartMethod != null)}, FeedSetNextClip={(feedSetNextClipTypeMethod != null)}, FeedReloading={(feedReloadingProperty != null)}, FeedPause={(feedForcePauseReloadProperty != null)}, TimePause={(timeControllerPauseGameMethod != null)}, TimeUnpause={(timeControllerUnpauseGameMethod != null)}, TimePausedProp={(timeControllerPausedProperty != null)}, MenuFocusIn={(playerInputOnMenuTakingFocusMethod != null)}, MenuFocusOut={(playerInputOnMenuLosingFocusMethod != null)}, CameraDetach={(cameraManagerForceDetachCameraMethod != null)}, SuspendCamera={(playerInputSuspendCameraInputsBackingField != null)}, SuspendGunner={(playerInputSuspendGunnerInputsBackingField != null)}, SuspendInterface={(playerInputSuspendInterfaceInputsBackingField != null)}, WeaponCurrentAmmo={(weaponCurrentAmmoTypeProperty != null)}, RackRegenerate={(rackRegenerateSlotIndicesMethod != null)}, MainGunAmmo={(mainGunAmmoField != null)}, MainGunReadyRack={(mainGunReadyRackField != null)}, MainGunCounts={(mainGunAmmoCountsField != null)}, MainGunSelect={(mainGunSelectAmmoTypeMethod != null)}, MainGunBreech={(mainGunForceRoundToBreechMethod != null)}");
+            Log($"反射缓存: RemoveAmmoVisualFromSlot={(removeVisualMethod != null)}, PlaceAmmoVisualInSlot={(placeAmmoVisualMethod != null)}, RackAddVisibleClip={(rackAddVisibleClipMethod != null)}, RackAddInvisibleClip={(rackAddInvisibleClipMethod != null)}, RackAddAnyClip={(rackAddClipToAnySlotMethod != null)}, RegisterAllBallistics={(registerBallisticsMethod != null)}, RefreshSnapshot={(refreshSnapshotMethod != null)}, _totalAmmoCount={(totalAmmoCountField != null)}, _totalAmmoTypes={(totalAmmoTypesField != null)}, StoredClips={(storedClipsProperty != null)}, StoredClipsBacking={(storedClipsBackingField != null)}, SlotIndices={(slotIndicesByAmmoTypeField != null)}, VisualSlots={(visualSlotsField != null)}, FeedLoadedClip={(feedLoadedClipProperty != null)}, AmmoTypeInBreechBacking={(ammoTypeInBreechBackingField != null)}, LoadedClipTypeBacking={(loadedClipTypeBackingField != null)}, QueuedClipTypeBacking={(queuedClipTypeBackingField != null)}, FeedClipMain={(feedClipMainField != null)}, FeedClipAux={(feedClipAuxField != null)}, FeedAuxMode={(feedAuxFeedModeField != null)}, FeedStart={(feedStartMethod != null)}, FeedSetNextClip={(feedSetNextClipTypeMethod != null)}, FeedReloading={(feedReloadingProperty != null)}, FeedPause={(feedForcePauseReloadProperty != null)}, TimePause={(timeControllerPauseGameMethod != null)}, TimeUnpause={(timeControllerUnpauseGameMethod != null)}, TimePausedProp={(timeControllerPausedProperty != null)}, MenuFocusIn={(playerInputOnMenuTakingFocusMethod != null)}, MenuFocusOut={(playerInputOnMenuLosingFocusMethod != null)}, CameraDetach={(cameraManagerForceDetachCameraMethod != null)}, SuspendCamera={(playerInputSuspendCameraInputsBackingField != null)}, SuspendGunner={(playerInputSuspendGunnerInputsBackingField != null)}, SuspendInterface={(playerInputSuspendInterfaceInputsBackingField != null)}, WeaponCurrentAmmo={(weaponCurrentAmmoTypeProperty != null)}, FcsCurrentAmmo={(fcsCurrentAmmoTypeProperty != null)}, FcsAmmoTypeChanged={(fcsAmmoTypeChangedMethod != null)}, WeaponNewRoundInBreech={(weaponNewRoundInBreechMethod != null)}, RackRegenerate={(rackRegenerateSlotIndicesMethod != null)}, MainGunAmmo={(mainGunAmmoField != null)}, MainGunReadyRack={(mainGunReadyRackField != null)}, MainGunCounts={(mainGunAmmoCountsField != null)}, MainGunSelect={(mainGunSelectAmmoTypeMethod != null)}, MainGunBreech={(mainGunForceRoundToBreechMethod != null)}");
             Log(LocalizationManager.Get("log_mod_initialized"));
         }
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
         {
             gameReady = false;
+            // 清空待处理的载具队列
+            pendingVehicles.Clear();
+            pendingVehicleTimer = 0f;
             StateController.RunOrDefer(GameState.GameReady, new GameStateEventHandler(OnGameReady), GameStatePriority.Lowest);
         }
 
@@ -188,6 +241,9 @@ namespace LoadoutManager
         {
             if (!gameReady) return;
 
+            // 处理待延迟的载具队列（M6A2-ADATS 兼容）
+            ProcessPendingVehicles();
+
             // 检测玩家当前载具
             var playerInput = PlayerInput.Instance;
             if (playerInput == null) return;
@@ -200,22 +256,71 @@ namespace LoadoutManager
             {
                 Log(LocalizationManager.Get("log_new_vehicle", playerUnit));
                 configuredVehicles.Add(playerUnit);
-                CaptureVehicleState(playerUnit);
 
-                if (weaponStates.Count > 0)
+                // M6A2-ADATS 兼容性：如果检测到该 Mod，延迟读取弹药状态
+                if (IsM6A2AdatsPresent())
                 {
-                    Log(LocalizationManager.Get("log_weapons_found", weaponStates.Count));
-                    OpenUI(playerUnit);
+                    Log($"检测到新载具，加入延迟处理队列: {playerUnit}");
+                    pendingVehicles.Enqueue(playerUnit);
+                    pendingVehicleTimer = Time.time;
                 }
                 else
                 {
-                    Log(LocalizationManager.Get("log_no_weapons"));
+                    CaptureVehicleState(playerUnit);
+
+                    if (weaponStates.Count > 0)
+                    {
+                        Log(LocalizationManager.Get("log_weapons_found", weaponStates.Count));
+                        OpenUI(playerUnit);
+                    }
+                    else
+                    {
+                        Log(LocalizationManager.Get("log_no_weapons"));
+                    }
                 }
             }
             else if (showUI && !Equals(currentUnit, playerUnit))
             {
                 // 切换到其他载具，关闭当前UI
                 CloseUI();
+            }
+        }
+
+        private void ProcessPendingVehicles()
+        {
+            if (pendingVehicles.Count == 0) return;
+
+            // 等待延迟时间
+            if (Time.time - pendingVehicleTimer < M6A2_ADATS_DELAY_SECONDS) return;
+
+            // 获取当前玩家载具
+            var playerInput = PlayerInput.Instance;
+            var currentUnit = playerInput?.CurrentPlayerUnit;
+
+            while (pendingVehicles.Count > 0)
+            {
+                var pendingUnit = pendingVehicles.Dequeue();
+
+                // 如果玩家已经切换到其他载具，跳过此载具
+                if (!Equals(pendingUnit, currentUnit))
+                {
+                    Log($"玩家已切换载具，跳过延迟处理: {pendingUnit}");
+                    continue;
+                }
+
+                Log($"延迟处理载具: {pendingUnit}");
+
+                CaptureVehicleState(pendingUnit);
+
+                if (weaponStates.Count > 0)
+                {
+                    Log(LocalizationManager.Get("log_weapons_found", weaponStates.Count));
+                    OpenUI(pendingUnit);
+                }
+                else
+                {
+                    Log(LocalizationManager.Get("log_no_weapons"));
+                }
             }
         }
 
@@ -259,6 +364,12 @@ namespace LoadoutManager
 
                 // 按rack组织UI
                 int rackCount = weapon.ammoTypes.Count > 0 ? weapon.ammoTypes[0].rackCounts.Length : 0;
+                if (IsOriginalTotalAmmoLimitEnabled())
+                {
+                    int currentTotal = GetWeaponRackGrandTotal(weapon);
+                    GUILayout.Label($"Total Ammo Budget: {currentTotal}/{weapon.originalRackTotalBudget}", GUILayout.Height(20));
+                }
+
                 // 机炮/双弹链的 Rack 0 通常是供弹接口架，不是玩家真正要编辑的备弹架；先默认隐藏，后续可在这里加开关。
                 int firstVisibleRackIndex = GetVisibleRackStartIndex(weapon);
                 if (weapon.usesAutocannonFeedMode && firstVisibleRackIndex > 0)
@@ -510,6 +621,8 @@ namespace LoadoutManager
                     weaponState.ammoTypes.Add(ammoState);
                 }
 
+                weaponState.originalRackTotalBudget = GetWeaponRackGrandTotal(weaponState);
+
                 if (weaponState.usesAutocannonFeedMode)
                 {
                     weaponState.totalLoadedRounds = weaponState.ammoTypes.Sum(ammo => ammo.currentLoadedCount);
@@ -560,6 +673,9 @@ namespace LoadoutManager
                         ammoCodexes[i] = weaponState.ammoTypes[i].ammoCodex;
                         ammoTypes[i] = weaponState.ammoTypes[i].ammoType;
                     }
+
+                    // 应用前兜底：限制总弹药不超过原车总量
+                    EnforceWeaponRackTotalBudget(weaponState, -1, -1);
 
                     // 更新总数
                     Log("更新TotalAmmoCounts:");
@@ -616,16 +732,28 @@ namespace LoadoutManager
 
                     LogLoadoutSnapshot("清空后运行态", lm, weaponState.weapon as WeaponSystem);
 
-                    // 手动重建各弹药架
-                    Log("手动填充各弹药架");
-                    for (int rackIndex = 0; rackIndex < lm.RackLoadouts.Length; rackIndex++)
+                    bool spawnedViaLoadoutManager = TrySpawnCurrentLoadout(lm);
+                    if (!spawnedViaLoadoutManager)
                     {
-                        var rack = lm.RackLoadouts[rackIndex].Rack;
-                        var desiredRackCounts = lm.RackLoadouts[rackIndex].AmmoCounts;
-                        FillRack(rack, clipTypes, ammoTypes, desiredRackCounts);
+                        Log("Fallback: SpawnCurrentLoadout unavailable, using manual rack fill.");
+                        for (int rackIndex = 0; rackIndex < lm.RackLoadouts.Length; rackIndex++)
+                        {
+                            var rack = lm.RackLoadouts[rackIndex].Rack;
+                            var desiredRackCounts = lm.RackLoadouts[rackIndex].AmmoCounts;
+                            FillRack(rack, clipTypes, ammoTypes, desiredRackCounts);
+                        }
                     }
+                    else
+                    {
+                        Log("已使用LoadoutManager.SpawnCurrentLoadout重建各弹药架");
+                    }
+
                     TryRefreshSnapshot(lm);
-                    LogLoadoutSnapshot("手动填充后", lm, weaponState.weapon as WeaponSystem);
+                    foreach (var rackLoadout in lm.RackLoadouts)
+                    {
+                        TryRefreshRackFlammables(rackLoadout.Rack);
+                    }
+                    LogLoadoutSnapshot(spawnedViaLoadoutManager ? "原生重建后" : "手动填充后", lm, weaponState.weapon as WeaponSystem);
 
                     // 检查生成结果
                     Log("检查生成结果:");
@@ -637,6 +765,7 @@ namespace LoadoutManager
 
                     // 同步老式MainGun状态（如存在）
                     var weapon = weaponState.weapon as WeaponSystem;
+                    AmmoType finalSelectedAmmoType = null;
                     bool preserveFeedState = ShouldPreserveFeedState(weapon, lm);
                     bool legacyMainGunHandled = false;
                     if (!preserveFeedState)
@@ -661,6 +790,7 @@ namespace LoadoutManager
                         var selectedAmmoType = weaponState.selectedChamberedIndex >= 0 && weaponState.selectedChamberedIndex < ammoTypes.Length
                             ? ammoTypes[weaponState.selectedChamberedIndex]
                             : null;
+                        finalSelectedAmmoType = selectedAmmoType;
 
                         if (preserveFeedState)
                         {
@@ -703,9 +833,18 @@ namespace LoadoutManager
                             LogFeedState("Feed同步后", weapon.Feed);
                         }
                     }
+
+                    if (!weaponState.isReloading
+                        && weaponState.selectedChamberedIndex >= 0
+                        && weaponState.selectedChamberedIndex < ammoTypes.Length)
+                    {
+                        finalSelectedAmmoType = ammoTypes[weaponState.selectedChamberedIndex];
+                    }
+
                     // 注册弹道
                     Log("调用RegisterAllBallistics()");
                     TryRegisterAllBallistics(lm);
+                    TrySyncWeaponBallisticsState(weapon, finalSelectedAmmoType, !weaponState.isReloading);
                     LogLoadoutSnapshot("RegisterAllBallistics后", lm, weapon);
 
                     Log("=== 弹药配置应用完成 ===");
@@ -738,11 +877,64 @@ namespace LoadoutManager
                     }
                 }
 
+                TryRefreshRackFlammables(rack);
                 Log($"EmptyRack完成: Rack={rack.name}, StoredClips={GetStoredClipCount(rack)}, SlotTypes={GetSlotIndicesCount(rack)}");
             }
             catch (Exception e)
             {
                 MelonLogger.Error(LocalizationManager.Get("log_empty_rack_failed", e.Message));
+            }
+        }
+
+        private static bool TrySpawnCurrentLoadout(GHPC.Weapons.LoadoutManager lm)
+        {
+            if (lm == null || spawnCurrentLoadoutMethod == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var parameters = spawnCurrentLoadoutMethod.GetParameters();
+                if (parameters.Length == 0)
+                {
+                    spawnCurrentLoadoutMethod.Invoke(lm, null);
+                }
+                else
+                {
+                    spawnCurrentLoadoutMethod.Invoke(lm, new object[] { true });
+                }
+
+                return true;
+            }
+            catch (Exception e)
+            {
+                Log($"SpawnCurrentLoadout failed: {e.Message}");
+                return false;
+            }
+        }
+
+        private static void TryRefreshRackFlammables(GHPC.Weapons.AmmoRack rack)
+        {
+            if (rack == null || rackFlammablesField == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var flammables = rackFlammablesField.GetValue(rack);
+                if (flammables == null)
+                {
+                    return;
+                }
+
+                flammablesRefreshExplosivesStatusMethod?.Invoke(flammables, null);
+                flammablesRefreshUndetonatedExplosivesStatusMethod?.Invoke(flammables, null);
+            }
+            catch (Exception e)
+            {
+                Log($"Rack flammables refresh failed: Rack={rack.name}, Error={e.Message}");
             }
         }
 
@@ -758,6 +950,13 @@ namespace LoadoutManager
 
                 EnsureRackReflection(rack);
                 Log($"开始填充Rack={rack.name}: 目标=[{FormatIntArray(desiredRackCounts)}]");
+
+                if (TryPopulateRackWithNativeMethods(rack, clipTypes, desiredRackCounts))
+                {
+                    TryRefreshRackFlammables(rack);
+                    Log($"FillRack完成(原生): Rack={rack.name}, StoredClips={GetStoredClipCount(rack)}, SlotTypes={GetSlotIndicesCount(rack)}, 内容=[{FormatStoredClipList(GetStoredClips(rack))}]");
+                    return;
+                }
 
                 var newStoredClips = new List<AmmoType.AmmoClip>();
                 var slotIndices = new Dictionary<AmmoType, List<byte>>();
@@ -797,12 +996,88 @@ namespace LoadoutManager
                 SetSlotIndicesByAmmoType(rack, slotIndices);
                 PlaceRackVisuals(rack, ammoTypes, desiredRackCounts);
                 TryRegenerateSlotIndices(rack);
+                TryRefreshRackFlammables(rack);
 
                 Log($"FillRack完成: Rack={rack.name}, StoredClips={GetStoredClipCount(rack)}, SlotTypes={GetSlotIndicesCount(rack)}, 内容=[{FormatStoredClipList(GetStoredClips(rack))}]");
             }
             catch (Exception e)
             {
                 MelonLogger.Error(LocalizationManager.Get("log_fill_rack_failed", e.Message));
+            }
+        }
+
+        private static bool TryPopulateRackWithNativeMethods(GHPC.Weapons.AmmoRack rack, AmmoType.AmmoClip[] clipTypes, int[] desiredRackCounts)
+        {
+            if (rack == null || clipTypes == null || desiredRackCounts == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                int desiredTotal = 0;
+                foreach (int desiredCount in desiredRackCounts)
+                {
+                    desiredTotal += Math.Max(0, desiredCount);
+                }
+
+                int visibleSlotCount = 0;
+                var visualSlots = GetVisualSlots(rack);
+                if (visualSlots != null)
+                {
+                    foreach (var _ in visualSlots)
+                    {
+                        visibleSlotCount++;
+                    }
+                }
+
+                int addedCount = 0;
+                for (int ammoIndex = 0; ammoIndex < desiredRackCounts.Length && ammoIndex < clipTypes.Length; ammoIndex++)
+                {
+                    var clipType = clipTypes[ammoIndex];
+                    int desiredCount = Math.Max(0, desiredRackCounts[ammoIndex]);
+                    if (clipType == null)
+                    {
+                        continue;
+                    }
+
+                    for (int count = 0; count < desiredCount; count++)
+                    {
+                        if (addedCount >= rack.ClipCapacity)
+                        {
+                            Log($"Rack={rack.name} 已达容量上限 {rack.ClipCapacity}，停止继续填充(原生)");
+                            TryRegenerateSlotIndices(rack);
+                            return true;
+                        }
+
+                        if (addedCount < visibleSlotCount && rackAddVisibleClipMethod != null)
+                        {
+                            rackAddVisibleClipMethod.Invoke(rack, new object[] { addedCount, clipType, true });
+                        }
+                        else if (rackAddInvisibleClipMethod != null)
+                        {
+                            rackAddInvisibleClipMethod.Invoke(rack, new object[] { clipType });
+                        }
+                        else if (rackAddClipToAnySlotMethod != null)
+                        {
+                            rackAddClipToAnySlotMethod.Invoke(rack, new object[] { clipType });
+                        }
+                        else
+                        {
+                            return false;
+                        }
+
+                        addedCount++;
+                    }
+                }
+
+                TryRegenerateSlotIndices(rack);
+                return addedCount > 0 || desiredTotal == 0;
+            }
+            catch (Exception e)
+            {
+                Log($"TryPopulateRackWithNativeMethods failed: Rack={rack.name}, Error={e.Message}");
+                return false;
             }
         }
 
@@ -1474,6 +1749,7 @@ namespace LoadoutManager
             Log($"Feed路径判定: Weapon={(weapon != null ? weapon.name : "<null>")}, DualFeed={dualFeed}, LoadedClipCount={loadedClipCount}, FeedClipMainCount={feedClipMainCount}, FeedClipAuxCount={feedClipAuxCount}, CurrentClipRemainingCount={feed.CurrentClipRemainingCount}, OverrideInitialClips={hasOverrideInitialClips}, Preserve={preserve}");
             return preserve;
         }
+
         private void PlaceRackVisuals(GHPC.Weapons.AmmoRack rack, AmmoType[] ammoTypes, int[] desiredRackCounts)
         {
             try
@@ -1483,11 +1759,23 @@ namespace LoadoutManager
                     return;
                 }
 
-                int visualSlotCount = GetEnumerableCount(GetVisualSlots(rack));
-                int maxVisualSlots = Math.Min(rack.ClipCapacity, visualSlotCount);
+                var visualSlots = GetVisualSlots(rack);
+                var visualSlotList = new List<Transform>();
+                if (visualSlots != null)
+                {
+                    foreach (var slot in visualSlots)
+                    {
+                        if (slot is Transform slotTransform)
+                        {
+                            visualSlotList.Add(slotTransform);
+                        }
+                    }
+                }
+
+                int maxVisualSlots = Math.Min(rack.ClipCapacity, visualSlotList.Count);
                 if (maxVisualSlots <= 0)
                 {
-                    Log($"PlaceRackVisuals跳过: Rack={rack.name}, VisualSlots={visualSlotCount}, ClipCapacity={rack.ClipCapacity}");
+                    Log($"PlaceRackVisuals跳过: Rack={rack.name}, VisualSlots={visualSlotList.Count}, ClipCapacity={rack.ClipCapacity}");
                     return;
                 }
 
@@ -1508,7 +1796,14 @@ namespace LoadoutManager
                         {
                             try
                             {
-                                rack.PlaceInertAmmoVisualInSlot(ammoType, slotIndex);
+                                if (placeAmmoVisualMethod != null)
+                                {
+                                    placeAmmoVisualMethod.Invoke(rack, new object[] { ammoType, visualSlotList[slotIndex] });
+                                }
+                                else
+                                {
+                                    rack.PlaceInertAmmoVisualInSlot(ammoType, slotIndex);
+                                }
                             }
                             catch (Exception slotException)
                             {
@@ -1708,6 +2003,55 @@ namespace LoadoutManager
             }
         }
 
+        private static void TrySyncWeaponBallisticsState(WeaponSystem weapon, AmmoType ammoType, bool notifyRoundInBreech)
+        {
+            if (weapon == null || ammoType == null)
+            {
+                return;
+            }
+
+            TrySetWeaponCurrentAmmoType(weapon, ammoType);
+
+            var fcs = weapon.FCS;
+            if (fcs != null)
+            {
+                try
+                {
+                    fcsCurrentAmmoTypeProperty?.SetValue(fcs, ammoType, null);
+                    Log($"同步FCS.CurrentAmmoType: {DescribeObject(ammoType)}");
+                }
+                catch (Exception e)
+                {
+                    Log($"设置FCS.CurrentAmmoType失败: {e.Message}");
+                }
+
+                try
+                {
+                    fcsAmmoTypeChangedMethod?.Invoke(fcs, new object[] { ammoType });
+                    Log($"调用FCS.ammoTypeChanged: {DescribeObject(ammoType)}");
+                }
+                catch (Exception e)
+                {
+                    Log($"调用FCS.ammoTypeChanged失败: {e.Message}");
+                }
+            }
+
+            if (!notifyRoundInBreech)
+            {
+                return;
+            }
+
+            try
+            {
+                weaponNewRoundInBreechMethod?.Invoke(weapon, new object[] { ammoType });
+                Log($"调用Weapon.newRoundInBreech: {DescribeObject(ammoType)}");
+            }
+            catch (Exception e)
+            {
+                Log($"调用Weapon.newRoundInBreech失败: {e.Message}");
+            }
+        }
+
         private MainGun FindLegacyMainGun(WeaponSystem weapon)
         {
             if (weapon == null)
@@ -1771,7 +2115,7 @@ namespace LoadoutManager
 
             if (fallback != null)
             {
-                Log($"FindLegacyMainGun: 未匹配ReadyRack，回退使用 {fallback.name}");
+                Log($"FindLegacyMainGun: ReadyRack did not match, falling back to {fallback.name}");
             }
 
             return fallback;
@@ -1835,6 +2179,8 @@ namespace LoadoutManager
             {
                 weapon.ammoTypes[changedAmmoIndex].rackCounts[rackIndex] = Math.Max(0, weapon.ammoTypes[changedAmmoIndex].rackCounts[rackIndex] - overflow);
             }
+
+            EnforceWeaponRackTotalBudget(weapon, rackIndex, changedAmmoIndex);
         }
 
         private static void FillRackExclusive(WeaponState weapon, int rackIndex, int ammoIndex)
@@ -1848,6 +2194,82 @@ namespace LoadoutManager
             for (int i = 0; i < weapon.ammoTypes.Count; i++)
             {
                 weapon.ammoTypes[i].rackCounts[rackIndex] = i == ammoIndex ? rackCapacity : 0;
+            }
+
+            EnforceWeaponRackTotalBudget(weapon, rackIndex, ammoIndex);
+        }
+
+        private static bool IsOriginalTotalAmmoLimitEnabled()
+        {
+            return limitTotalAmmoByOriginalVehicleCount != null && limitTotalAmmoByOriginalVehicleCount.Value;
+        }
+
+        private static int GetWeaponRackGrandTotal(WeaponState weapon)
+        {
+            if (weapon == null || weapon.ammoTypes == null)
+            {
+                return 0;
+            }
+
+            int total = 0;
+            foreach (var ammo in weapon.ammoTypes)
+            {
+                if (ammo?.rackCounts == null)
+                {
+                    continue;
+                }
+
+                for (int rackIndex = 0; rackIndex < ammo.rackCounts.Length; rackIndex++)
+                {
+                    total += Math.Max(0, ammo.rackCounts[rackIndex]);
+                }
+            }
+
+            return total;
+        }
+
+        private static void EnforceWeaponRackTotalBudget(WeaponState weapon, int changedRackIndex, int changedAmmoIndex)
+        {
+            if (!IsOriginalTotalAmmoLimitEnabled() || weapon == null || weapon.ammoTypes == null || weapon.ammoTypes.Count == 0)
+            {
+                return;
+            }
+
+            int budget = Math.Max(0, weapon.originalRackTotalBudget);
+            int overflow = GetWeaponRackGrandTotal(weapon) - budget;
+            if (overflow <= 0)
+            {
+                return;
+            }
+
+            for (int rackIndex = 0; rackIndex < weapon.ammoTypes[0].rackCounts.Length && overflow > 0; rackIndex++)
+            {
+                for (int ammoIndex = 0; ammoIndex < weapon.ammoTypes.Count && overflow > 0; ammoIndex++)
+                {
+                    if (rackIndex == changedRackIndex && ammoIndex == changedAmmoIndex)
+                    {
+                        continue;
+                    }
+
+                    int current = weapon.ammoTypes[ammoIndex].rackCounts[rackIndex];
+                    if (current <= 0)
+                    {
+                        continue;
+                    }
+
+                    int reduction = Math.Min(current, overflow);
+                    weapon.ammoTypes[ammoIndex].rackCounts[rackIndex] = current - reduction;
+                    overflow -= reduction;
+                }
+            }
+
+            if (overflow > 0
+                && changedAmmoIndex >= 0
+                && changedAmmoIndex < weapon.ammoTypes.Count
+                && changedRackIndex >= 0
+                && changedRackIndex < weapon.ammoTypes[changedAmmoIndex].rackCounts.Length)
+            {
+                weapon.ammoTypes[changedAmmoIndex].rackCounts[changedRackIndex] = Math.Max(0, weapon.ammoTypes[changedAmmoIndex].rackCounts[changedRackIndex] - overflow);
             }
         }
 
@@ -2116,7 +2538,7 @@ namespace LoadoutManager
                 }
 
                 timeControllerPausedProperty?.SetValue(null, paused, null);
-                Log($"回退设置TimeController.Paused = {paused}");
+                Log($"Fallback: set TimeController.Paused = {paused}");
             }
             catch (Exception e)
             {
@@ -2280,6 +2702,7 @@ namespace LoadoutManager
             public int totalLoadedRounds = 0;
             public int selectedChamberedIndex = 0;
             public bool isReloading = false;
+            public int originalRackTotalBudget = 0;
         }
 
         private class AmmoTypeState
